@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dashmap::DashMap;
 use hash_map_id::HashMapId;
+use lunatic_assemblyscript_rtrace_api::{RtraceCtx, RtraceState};
 use lunatic_distributed::{DistributedCtx, DistributedProcessState};
 use lunatic_error_api::{ErrorCtx, ErrorResource};
 use lunatic_networking_api::{DnsIterator, TlsConnection, TlsListener};
@@ -61,6 +62,8 @@ pub struct DefaultProcessState {
     initialized: bool,
     // Shared process registry
     registry: Arc<DashMap<String, (u64, u64)>>,
+    // The AssemblyScript rtrace state
+    rtrace: Option<RtraceState>,
 }
 
 impl DefaultProcessState {
@@ -95,6 +98,7 @@ impl DefaultProcessState {
             wasi_stderr: None,
             initialized: false,
             registry,
+            rtrace: None,
         };
         Ok(state)
     }
@@ -131,6 +135,7 @@ impl ProcessState for DefaultProcessState {
             wasi_stderr: None,
             initialized: false,
             registry: self.registry.clone(),
+            rtrace: None,
         };
         Ok(state)
     }
@@ -161,6 +166,7 @@ impl ProcessState for DefaultProcessState {
             wasi_stdout: None,
             wasi_stderr: None,
             initialized: false,
+            rtrace: None,
         }
     }
 
@@ -174,6 +180,7 @@ impl ProcessState for DefaultProcessState {
         lunatic_wasi_api::register(linker)?;
         lunatic_registry_api::register(linker)?;
         lunatic_distributed_api::register(linker)?;
+        lunatic_assemblyscript_rtrace_api::register(linker)?;
         Ok(())
     }
 
@@ -456,8 +463,19 @@ impl DistributedCtx<LunaticEnvironment> for DefaultProcessState {
             wasi_stderr: None,
             initialized: false,
             registry: Default::default(), // TODO move registry into env?
+            rtrace: None,
         };
         Ok(state)
+    }
+}
+
+impl RtraceCtx for DefaultProcessState {
+    fn rtrace_state(&self) -> &Option<RtraceState> {
+        &self.rtrace
+    }
+
+    fn rtrace_state_mut(&mut self) -> &mut Option<RtraceState> {
+        &mut self.rtrace
     }
 }
 
