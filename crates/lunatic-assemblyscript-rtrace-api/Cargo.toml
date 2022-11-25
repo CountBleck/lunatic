@@ -14,3 +14,4 @@ anyhow = { workspace = true }
 log = { workspace = true }
 wasmtime = { workspace = true }
 lunatic-process = { workspace = true }
+lunatic-common-api = { workspace = true }

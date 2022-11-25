@@ -1114,6 +1114,7 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "log",
+ "lunatic-common-api",
  "lunatic-process",
  "wasmtime",
 ]

@@ -2,9 +2,10 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant}
 };
-use wasmtime::{Linker, Caller};
+use wasmtime::{Linker, Caller, Trap};
 use log::{trace, warn, error};
 use lunatic_process::state::ProcessState;
+use lunatic_common_api::IntoTrap;
 
 mod block;
 mod shadow;
@@ -83,50 +84,51 @@ where
     trace!("INIT heapBase={heap_base}");
 }
 
-fn onalloc<T>(mut caller: Caller<T>, block: u32)
+fn onalloc<T>(mut caller: Caller<T>, block: u32) -> Result<(), Trap>
 where
     T: ProcessState + RtraceCtx
 {
     // TODO: stack traces
-    let info = block::get_block_info(&mut caller, block);
-    let memory_length = util::get_memory_length(&mut caller);
+    let info = block::get_block_info(&mut caller, block)?;
+    let memory_length = util::get_memory_length(&mut caller)?;
     let state = caller
         .data_mut()
         .rtrace_state_mut()
         .as_mut()
-        .unwrap();
+        .or_trap("rtrace onalloc: expected an RtraceState to be initialized")?;
 
     state.alloc_count += 1;
     shadow::sync_shadow(memory_length, &mut state.shadow);
 
     if state.blocks.contains_key(&block) {
         error!("duplicate alloc: {block} {:#?}", info);
-        return;
+        return Ok(());
     }
 
     trace!("ALLOC {block}..{}", block + info.size);
     shadow::mark_shadow(&info, state, 0);
     state.blocks.insert(block, info);
+    Ok(())
 }
 
-fn onresize<T>(mut caller: Caller<T>, block: u32, old_size_with_overhead: u32)
+fn onresize<T>(mut caller: Caller<T>, block: u32, old_size_with_overhead: u32) -> Result<(), Trap>
 where
     T: ProcessState + RtraceCtx
 {
-    let info = block::get_block_info(&mut caller, block);
-    let memory_length = util::get_memory_length(&mut caller);
+    let info = block::get_block_info(&mut caller, block)?;
+    let memory_length = util::get_memory_length(&mut caller)?;
     let mut state = caller
         .data_mut()
         .rtrace_state_mut()
         .as_mut()
-        .unwrap();
+        .or_trap("rtrace onresize: expected an RtraceState to be initialized")?;
 
     state.resize_count += 1;
     shadow::sync_shadow(memory_length, &mut state.shadow);
 
     if !state.blocks.contains_key(&block) {
         error!("orphaned resize: {block} {:#?}", info);
-        return;
+        return Ok(());
     }
 
     let before_info = state.blocks.get(&block).unwrap();
@@ -149,32 +151,33 @@ where
     }
 
     state.blocks.insert(block, info);
+    Ok(())
 }
 
-fn onmove<T>(mut caller: Caller<T>, old_block: u32, new_block: u32)
+fn onmove<T>(mut caller: Caller<T>, old_block: u32, new_block: u32) -> Result<(), Trap>
 where
     T: ProcessState + RtraceCtx
 {
-    let old_info = block::get_block_info(&mut caller, old_block);
-    let new_info = block::get_block_info(&mut caller, new_block);
-    let memory_length = util::get_memory_length(&mut caller);
+    let old_info = block::get_block_info(&mut caller, old_block)?;
+    let new_info = block::get_block_info(&mut caller, new_block)?;
+    let memory_length = util::get_memory_length(&mut caller)?;
     let mut state = caller
         .data_mut()
         .rtrace_state_mut()
         .as_mut()
-        .unwrap();
+        .or_trap("rtrace onmove: expected an RtraceState to be initialized")?;
 
     state.move_count += 1;
     shadow::sync_shadow(memory_length, &mut state.shadow);
 
     if !state.blocks.contains_key(&old_block) {
         error!("orphaned move (old): {old_block} {:#?}", old_info);
-        return;
+        return Ok(());
     }
 
     if !state.blocks.contains_key(&new_block) {
         error!("orphaned move (new): {new_block} {:#?}", new_info);
-        return;
+        return Ok(());
     }
 
     let before_info = state.blocks.get(&old_block).unwrap();
@@ -186,26 +189,27 @@ where
     }
 
     trace!("MOVE {old_block}..{} -> {new_block}..{}", old_block + old_size, new_block + new_size);
+    Ok(())
 }
 
-fn onfree<T>(mut caller: Caller<T>, block: u32)
+fn onfree<T>(mut caller: Caller<T>, block: u32) -> Result<(), Trap>
 where
     T: ProcessState + RtraceCtx
 {
-    let info = block::get_block_info(&mut caller, block);
-    let memory_length = util::get_memory_length(&mut caller);
+    let info = block::get_block_info(&mut caller, block)?;
+    let memory_length = util::get_memory_length(&mut caller)?;
     let mut state = caller
         .data_mut()
         .rtrace_state_mut()
         .as_mut()
-        .unwrap();
+        .or_trap("rtrace onfree: expected an RtraceState to be initialized")?;
 
     state.free_count += 1;
     shadow::sync_shadow(memory_length, &mut state.shadow);
 
     if !state.blocks.contains_key(&block) {
         error!("orphaned free: {block} {:#?}", info);
-        return;
+        return Ok(());
     }
 
     let old_info = state.blocks.remove(&block).unwrap();
@@ -215,9 +219,10 @@ where
 
     trace!("FREE {block}..{}", block + info.size);
     shadow::unmark_shadow(&info, state, info.size);
+    Ok(())
 }
 
-fn onvisit<T>(mut caller: Caller<T>, block: u32) -> u32
+fn onvisit<T>(mut caller: Caller<T>, block: u32) -> Result<u32, Trap>
 where
     T: ProcessState + RtraceCtx
 {
@@ -226,17 +231,20 @@ where
         .data_mut()
         .rtrace_state_mut()
         .as_mut()
-        .unwrap();
+        .or_trap("rtrace onvisit: expected an RtraceState to be initialized")?;
 
-    if block <= state.heap_base.unwrap() || state.blocks.contains_key(&block) {
-        return 1;
+    if
+        block <= state.heap_base.or_trap("rtrace onvisit: expected an RtraceState with an initialized heap_base")? ||
+        state.blocks.contains_key(&block)
+    {
+        return Ok(1);
     }
 
     error!("orphaned visit: {block}");
-    return 0;
+    Ok(0)
 }
 
-fn oncollect<T>(mut caller: Caller<T>, total: u32)
+fn oncollect<T>(mut caller: Caller<T>, total: u32) -> Result<(), Trap>
 where
     T: ProcessState + RtraceCtx
 {
@@ -244,13 +252,14 @@ where
         .data_mut()
         .rtrace_state_mut()
         .as_mut()
-        .unwrap();
+        .or_trap("rtrace oncollect: expected an RtraceState to be initialized")?;
 
     trace!("COLLECT at {total}");
-    plot::plot(state, total, Duration::ZERO);
+    plot::plot(state, total, Duration::ZERO)?;
+    Ok(())
 }
 
-fn oninterrupt<T>(mut caller: Caller<T>, total: u32)
+fn oninterrupt<T>(mut caller: Caller<T>, total: u32) -> Result<(), Trap>
 where
     T: ProcessState + RtraceCtx
 {
@@ -258,13 +267,14 @@ where
         .data_mut()
         .rtrace_state_mut()
         .as_mut()
-        .unwrap();
+        .or_trap("rtrace oninterrupt: expected an RtraceState to be initialized")?;
 
     state.interrupt_start = Some(Instant::now());
-    plot::plot(state, total, Duration::ZERO);
+    plot::plot(state, total, Duration::ZERO)?;
+    Ok(())
 }
 
-fn onyield<T>(mut caller: Caller<T>, total: u32)
+fn onyield<T>(mut caller: Caller<T>, total: u32) -> Result<(), Trap>
 where
     T: ProcessState + RtraceCtx
 {
@@ -272,21 +282,24 @@ where
         .data_mut()
         .rtrace_state_mut()
         .as_mut()
-        .unwrap();
+        .or_trap("rtrace onyield: expected an RtraceState to be initialized")?;
 
-    let pause = Instant::now() - state.interrupt_start.unwrap();
+    let interrupt_start = state.interrupt_start
+        .or_trap("rtrace onyield: expected an RtraceState with an initialized interrupt_start")?;
+    let pause = Instant::now() - interrupt_start;
     if pause >= Duration::from_millis(1) {
         warn!("interrupted for {}ms", pause.as_millis());
     }
 
-    plot::plot(state, total, pause);
+    plot::plot(state, total, pause)?;
+    Ok(())
 }
 
-fn onstore<T>(mut caller: Caller<T>, ptr: u32, offset: u32, bytes: u32, is_rt_raw: u32) -> u32
+fn onstore<T>(mut caller: Caller<T>, ptr: u32, offset: u32, bytes: u32, is_rt_raw: u32) -> Result<u32, Trap>
 where
     T: ProcessState + RtraceCtx
 {
-    let memory_length = util::get_memory_length(&mut caller);
+    let memory_length = util::get_memory_length(&mut caller)?;
     let state = caller
         .data_mut()
         .rtrace_state_mut()
@@ -295,14 +308,14 @@ where
 
     shadow::sync_shadow(memory_length, &mut state.shadow);
     shadow::access_shadow(state, ptr + offset, bytes, false, is_rt_raw != 0);
-    ptr
+    Ok(ptr)
 }
 
-fn onload<T>(mut caller: Caller<T>, ptr: u32, offset: u32, bytes: u32, is_rt_raw: u32) -> u32
+fn onload<T>(mut caller: Caller<T>, ptr: u32, offset: u32, bytes: u32, is_rt_raw: u32) -> Result<u32, Trap>
 where
     T: ProcessState + RtraceCtx
 {
-    let memory_length = util::get_memory_length(&mut caller);
+    let memory_length = util::get_memory_length(&mut caller)?;
     let state = caller
         .data_mut()
         .rtrace_state_mut()
@@ -311,5 +324,5 @@ where
 
     shadow::sync_shadow(memory_length, &mut state.shadow);
     shadow::access_shadow(state, ptr + offset, bytes, true, is_rt_raw != 0);
-    ptr
+    Ok(ptr)
 }
